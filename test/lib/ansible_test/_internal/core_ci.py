@@ -4,6 +4,7 @@ __metaclass__ = type
 
 import json
 import os
+import re
 import traceback
 import uuid
 import errno
@@ -17,18 +18,21 @@ from .http import (
     HttpError,
 )
 
+from .io import (
+    make_dirs,
+    read_text_file,
+    write_json_file,
+    write_text_file,
+)
+
 from .util import (
     ApplicationError,
-    make_dirs,
     display,
-    is_shippable,
-    to_text,
     ANSIBLE_TEST_DATA_ROOT,
 )
 
 from .util_common import (
     run_command,
-    write_json_file,
     ResultType,
 )
 
@@ -36,19 +40,57 @@ from .config import (
     EnvironmentConfig,
 )
 
+from .ci import (
+    AuthContext,
+    get_ci_provider,
+)
+
 from .data import (
     data_context,
 )
 
-AWS_ENDPOINTS = {
-    'us-east-1': 'https://14blg63h2i.execute-api.us-east-1.amazonaws.com',
-    'us-east-2': 'https://g5xynwbk96.execute-api.us-east-2.amazonaws.com',
-}
-
 
 class AnsibleCoreCI:
     """Client for Ansible Core CI services."""
-    def __init__(self, args, platform, version, stage='prod', persist=True, load=True, name=None, provider=None):
+    DEFAULT_ENDPOINT = 'https://ansible-core-ci.testing.ansible.com'
+
+    # Assign a default provider for each VM platform supported.
+    # This is used to determine the provider from the platform when no provider is specified.
+    # The keys here also serve as the list of providers which users can select from the command line.
+    #
+    # Entries can take one of two formats:
+    #   {platform}
+    #   {platform} arch={arch}
+    #
+    # Entries with an arch are only used as a default if the value for --remote-arch matches the {arch} specified.
+    # This allows arch specific defaults to be distinct from the default used when no arch is specified.
+
+    PROVIDERS = dict(
+        aws=(
+            'freebsd',
+            'ios',
+            'rhel',
+            'vyos',
+            'windows',
+        ),
+        azure=(
+        ),
+        ibmps=(
+            'aix',
+            'ibmi',
+        ),
+        parallels=(
+            'macos',
+            'osx',
+        ),
+    )
+
+    # Currently ansible-core-ci has no concept of arch selection. This effectively means each provider only supports one arch.
+    # The list below identifies which platforms accept an arch, and which one. These platforms can only be used with the specified arch.
+    PROVIDER_ARCHES = dict(
+    )
+
+    def __init__(self, args, platform, version, stage='prod', persist=True, load=True, provider=None, arch=None, internal=False):
         """
         :type args: EnvironmentConfig
         :type platform: str
@@ -56,9 +98,12 @@ class AnsibleCoreCI:
         :type stage: str
         :type persist: bool
         :type load: bool
-        :type name: str
+        :type provider: str | None
+        :type arch: str | None
+        :type internal: bool
         """
         self.args = args
+        self.arch = arch
         self.platform = platform
         self.version = version
         self.stage = stage
@@ -66,93 +111,55 @@ class AnsibleCoreCI:
         self.connection = None
         self.instance_id = None
         self.endpoint = None
-        self.max_threshold = 1
-        self.name = name if name else '%s-%s' % (self.platform, self.version)
-        self.ci_key = os.path.expanduser('~/.ansible-core-ci.key')
-        self.resource = 'jobs'
+        self.default_endpoint = args.remote_endpoint or self.DEFAULT_ENDPOINT
+        self.retries = 3
+        self.ci_provider = get_ci_provider()
+        self.auth_context = AuthContext()
 
-        # Assign each supported platform to one provider.
-        # This is used to determine the provider from the platform when no provider is specified.
-        providers = dict(
-            aws=(
-                'aws',
-                'windows',
-                'freebsd',
-                'vyos',
-                'junos',
-                'ios',
-                'tower',
-                'rhel',
-                'hetzner',
-            ),
-            azure=(
-                'azure',
-            ),
-            parallels=(
-                'osx',
-            ),
-            vmware=(
-                'vmware'
-            ),
-        )
+        if self.arch:
+            self.name = '%s-%s-%s' % (self.arch, self.platform, self.version)
+        else:
+            self.name = '%s-%s' % (self.platform, self.version)
 
         if provider:
             # override default provider selection (not all combinations are valid)
             self.provider = provider
         else:
-            for candidate in providers:
-                if platform in providers[candidate]:
+            self.provider = None
+
+            for candidate in self.PROVIDERS:
+                choices = [
+                    platform,
+                    '%s arch=%s' % (platform, arch),
+                ]
+
+                if any(choice in self.PROVIDERS[candidate] for choice in choices):
                     # assign default provider based on platform
                     self.provider = candidate
                     break
-            for candidate in providers:
-                if '%s/%s' % (platform, version) in providers[candidate]:
-                    # assign default provider based on platform and version
-                    self.provider = candidate
-                    break
+
+        # If a provider has been selected, make sure the correct arch (or none) has been selected.
+        if self.provider:
+            required_arch = self.PROVIDER_ARCHES.get(self.provider)
+
+            if self.arch != required_arch:
+                if required_arch:
+                    if self.arch:
+                        raise ApplicationError('Provider "%s" requires the "%s" arch instead of "%s".' % (self.provider, required_arch, self.arch))
+
+                    raise ApplicationError('Provider "%s" requires the "%s" arch.' % (self.provider, required_arch))
+
+                raise ApplicationError('Provider "%s" does not support specification of an arch.' % self.provider)
 
         self.path = os.path.expanduser('~/.ansible/test/instances/%s-%s-%s' % (self.name, self.provider, self.stage))
 
-        if self.provider in ('aws', 'azure'):
-            if self.provider != 'aws':
-                self.resource = self.provider
+        if self.provider not in self.PROVIDERS and not internal:
+            if self.arch:
+                raise ApplicationError('Provider not detected for platform "%s" on arch "%s".' % (self.platform, self.arch))
 
-            if args.remote_aws_region:
-                # permit command-line override of region selection
-                region = args.remote_aws_region
-                # use a dedicated CI key when overriding the region selection
-                self.ci_key += '.%s' % args.remote_aws_region
-            elif is_shippable():
-                # split Shippable jobs across multiple regions to maximize use of launch credits
-                if self.platform == 'windows':
-                    region = 'us-east-2'
-                else:
-                    region = 'us-east-1'
-            else:
-                # send all non-Shippable jobs to us-east-1 to reduce api key maintenance
-                region = 'us-east-1'
+            raise ApplicationError('Provider not detected for platform "%s" with no arch specified.' % self.platform)
 
-            self.path = "%s-%s" % (self.path, region)
-            self.endpoints = (AWS_ENDPOINTS[region],)
-            self.ssh_key = SshKey(args)
-
-            if self.platform == 'windows':
-                self.port = 5986
-            else:
-                self.port = 22
-        elif self.provider == 'parallels':
-            self.endpoints = self._get_parallels_endpoints()
-            self.max_threshold = 6
-
-            self.ssh_key = SshKey(args)
-            self.port = None
-        elif self.provider == 'vmware':
-            self.ssh_key = SshKey(args)
-            self.endpoints = ['https://access.ws.testing.ansible.com']
-            self.max_threshold = 1
-
-        else:
-            raise ApplicationError('Unsupported platform: %s' % platform)
+        self.ssh_key = SshKey(args)
 
         if persist and load and self._load():
             try:
@@ -187,26 +194,13 @@ class AnsibleCoreCI:
 
             display.sensitive.add(self.instance_id)
 
-    def _get_parallels_endpoints(self):
-        """
-        :rtype: tuple[str]
-        """
-        client = HttpClient(self.args, always=True)
-        display.info('Getting available endpoints...', verbosity=1)
-        sleep = 3
+        if not self.endpoint:
+            self.endpoint = self.default_endpoint
 
-        for _iteration in range(1, 10):
-            response = client.get('https://s3.amazonaws.com/ansible-ci-files/ansible-test/parallels-endpoints.txt')
-
-            if response.status_code == 200:
-                endpoints = tuple(response.response.splitlines())
-                display.info('Available endpoints (%d):\n%s' % (len(endpoints), '\n'.join(' - %s' % endpoint for endpoint in endpoints)), verbosity=1)
-                return endpoints
-
-            display.warning('HTTP %d error getting endpoints, trying again in %d seconds.' % (response.status_code, sleep))
-            time.sleep(sleep)
-
-        raise ApplicationError('Unable to get available endpoints.')
+    @property
+    def available(self):
+        """Return True if Ansible Core CI is supported."""
+        return self.ci_provider.supports_core_ci_auth(self.auth_context)
 
     def start(self):
         """Start instance."""
@@ -215,31 +209,7 @@ class AnsibleCoreCI:
                          verbosity=1)
             return None
 
-        if is_shippable():
-            return self.start_shippable()
-
-        return self.start_remote()
-
-    def start_remote(self):
-        """Start instance for remote development/testing."""
-        with open(self.ci_key, 'r') as key_fd:
-            auth_key = key_fd.read().strip()
-
-        return self._start(dict(
-            remote=dict(
-                key=auth_key,
-                nonce=None,
-            ),
-        ))
-
-    def start_shippable(self):
-        """Start instance on Shippable."""
-        return self._start(dict(
-            shippable=dict(
-                run_id=os.environ['SHIPPABLE_BUILD_ID'],
-                job_number=int(os.environ['SHIPPABLE_JOB_NUMBER']),
-            ),
-        ))
+        return self._start(self.ci_provider.prepare_core_ci_auth(self.auth_context))
 
     def stop(self):
         """Stop instance."""
@@ -302,7 +272,7 @@ class AnsibleCoreCI:
             self.connection = InstanceConnection(
                 running=True,
                 hostname='cloud.example.com',
-                port=self.port or 12345,
+                port=12345,
                 username='username',
                 password='password' if self.platform == 'windows' else None,
             )
@@ -315,12 +285,12 @@ class AnsibleCoreCI:
                 self.connection = InstanceConnection(
                     running=status == 'running',
                     hostname=con['hostname'],
-                    port=int(con.get('port', self.port)),
+                    port=int(con['port']),
                     username=con['username'],
                     password=con.get('password'),
                     response_json=response_json,
                 )
-            else:  # 'vcenter' resp does not have a 'connection' key
+            else:
                 self.connection = InstanceConnection(
                     running=status == 'running',
                     response_json=response_json,
@@ -349,15 +319,14 @@ class AnsibleCoreCI:
 
     @property
     def _uri(self):
-        return '%s/%s/%s/%s' % (self.endpoint, self.stage, self.resource, self.instance_id)
+        return '%s/%s/%s/%s' % (self.endpoint, self.stage, self.provider, self.instance_id)
 
     def _start(self, auth):
         """Start instance."""
         display.info('Initializing new %s/%s instance %s.' % (self.platform, self.version, self.instance_id), verbosity=1)
 
         if self.platform == 'windows':
-            with open(os.path.join(ANSIBLE_TEST_DATA_ROOT, 'setup', 'ConfigureRemotingForAnsible.ps1'), 'rb') as winrm_config_fd:
-                winrm_config = to_text(winrm_config_fd.read())
+            winrm_config = read_text_file(os.path.join(ANSIBLE_TEST_DATA_ROOT, 'setup', 'ConfigureRemotingForAnsible.ps1'))
         else:
             winrm_config = None
 
@@ -365,7 +334,7 @@ class AnsibleCoreCI:
             config=dict(
                 platform=self.platform,
                 version=self.version,
-                public_key=self.ssh_key.pub_contents if self.ssh_key else None,
+                public_key=self.ssh_key.pub_contents,
                 query=False,
                 winrm_config=winrm_config,
             )
@@ -377,7 +346,7 @@ class AnsibleCoreCI:
             'Content-Type': 'application/json',
         }
 
-        response = self._start_try_endpoints(data, headers)
+        response = self._start_endpoint(data, headers)
 
         self.started = True
         self._save()
@@ -389,45 +358,16 @@ class AnsibleCoreCI:
 
         return response.json()
 
-    def _start_try_endpoints(self, data, headers):
+    def _start_endpoint(self, data, headers):
         """
         :type data: dict[str, any]
         :type headers: dict[str, str]
         :rtype: HttpResponse
         """
-        threshold = 1
-
-        while threshold <= self.max_threshold:
-            for self.endpoint in self.endpoints:
-                try:
-                    return self._start_at_threshold(data, headers, threshold)
-                except CoreHttpError as ex:
-                    if ex.status == 503:
-                        display.info('Service Unavailable: %s' % ex.remote_message, verbosity=1)
-                        continue
-                    display.error(ex.remote_message)
-                except HttpError as ex:
-                    display.error(u'%s' % ex)
-
-                time.sleep(3)
-
-            threshold += 1
-
-        raise ApplicationError('Maximum threshold reached and all endpoints exhausted.')
-
-    def _start_at_threshold(self, data, headers, threshold):
-        """
-        :type data: dict[str, any]
-        :type headers: dict[str, str]
-        :type threshold: int
-        :rtype: HttpResponse | None
-        """
-        tries = 3
+        tries = self.retries
         sleep = 15
 
-        data['threshold'] = threshold
-
-        display.info('Trying endpoint: %s (threshold %d)' % (self.endpoint, threshold), verbosity=1)
+        display.info('Trying endpoint: %s' % self.endpoint, verbosity=1)
 
         while True:
             tries -= 1
@@ -459,8 +399,7 @@ class AnsibleCoreCI:
     def _load(self):
         """Load instance information."""
         try:
-            with open(self.path, 'r') as instance_fd:
-                data = instance_fd.read()
+            data = read_text_file(self.path)
         except IOError as ex:
             if ex.errno != errno.ENOENT:
                 raise
@@ -551,8 +490,9 @@ class CoreHttpError(HttpError):
 
 class SshKey:
     """Container for SSH key used to connect to remote instances."""
-    KEY_NAME = 'id_rsa'
-    PUB_NAME = 'id_rsa.pub'
+    KEY_TYPE = 'rsa'  # RSA is used to maintain compatibility with paramiko and EC2
+    KEY_NAME = 'id_%s' % KEY_TYPE
+    PUB_NAME = '%s.pub' % KEY_NAME
 
     def __init__(self, args):
         """
@@ -571,13 +511,8 @@ class SshKey:
             Add the SSH keys to the payload file list.
             They are either outside the source tree or in the cache dir which is ignored by default.
             """
-            if data_context().content.collection:
-                working_path = data_context().content.collection.directory
-            else:
-                working_path = ''
-
-            files.append((key, os.path.join(working_path, os.path.relpath(key_dst, data_context().content.root))))
-            files.append((pub, os.path.join(working_path, os.path.relpath(pub_dst, data_context().content.root))))
+            files.append((key, os.path.relpath(key_dst, data_context().content.root)))
+            files.append((pub, os.path.relpath(pub_dst, data_context().content.root)))
 
         data_context().register_payload_callback(ssh_key_callback)
 
@@ -585,9 +520,10 @@ class SshKey:
 
         if args.explain:
             self.pub_contents = None
+            self.key_contents = None
         else:
-            with open(self.pub, 'r') as pub_fd:
-                self.pub_contents = pub_fd.read().strip()
+            self.pub_contents = read_text_file(self.pub).strip()
+            self.key_contents = read_text_file(self.key).strip()
 
     def get_in_tree_key_pair_paths(self):  # type: () -> t.Optional[t.Tuple[str, str]]
         """Return the ansible-test SSH key pair paths from the content tree."""
@@ -629,7 +565,13 @@ class SshKey:
             make_dirs(os.path.dirname(key))
 
         if not os.path.isfile(key) or not os.path.isfile(pub):
-            run_command(args, ['ssh-keygen', '-m', 'PEM', '-q', '-t', 'rsa', '-N', '', '-f', key])
+            run_command(args, ['ssh-keygen', '-m', 'PEM', '-q', '-t', self.KEY_TYPE, '-N', '', '-f', key])
+
+            # newer ssh-keygen PEM output (such as on RHEL 8.1) is not recognized by paramiko
+            key_contents = read_text_file(key)
+            key_contents = re.sub(r'(BEGIN|END) PRIVATE KEY', r'\1 RSA PRIVATE KEY', key_contents)
+
+            write_text_file(key, key_contents)
 
         return key, pub
 

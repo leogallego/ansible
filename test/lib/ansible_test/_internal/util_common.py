@@ -4,8 +4,8 @@ __metaclass__ = type
 
 import atexit
 import contextlib
-import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -13,21 +13,29 @@ import textwrap
 
 from . import types as t
 
+from .encoding import (
+    to_bytes,
+)
+
 from .util import (
     common_environment,
     COVERAGE_CONFIG_NAME,
     display,
     find_python,
-    is_shippable,
     remove_tree,
     MODE_DIRECTORY,
     MODE_FILE_EXECUTE,
     PYTHON_PATHS,
     raw_command,
-    to_bytes,
+    read_lines_without_comments,
     ANSIBLE_TEST_DATA_ROOT,
-    make_dirs,
     ApplicationError,
+    cmd_quote,
+)
+
+from .io import (
+    write_text_file,
+    write_json_file,
 )
 
 from .data import (
@@ -37,6 +45,23 @@ from .data import (
 from .provider.layout import (
     LayoutMessages,
 )
+
+DOCKER_COMPLETION = {}  # type: t.Dict[str, t.Dict[str, str]]
+REMOTE_COMPLETION = {}  # type: t.Dict[str, t.Dict[str, str]]
+NETWORK_COMPLETION = {}  # type: t.Dict[str, t.Dict[str, str]]
+
+
+class ShellScriptTemplate:
+    """A simple substition template for shell scripts."""
+    def __init__(self, template):  # type: (str) -> None
+        self.template = template
+
+    def substitute(self, **kwargs):
+        """Return a string templated with the given arguments."""
+        kvp = dict((k, cmd_quote(v)) for k, v in kwargs.items())
+        pattern = re.compile(r'#{(?P<name>[^}]+)}')
+        value = pattern.sub(lambda match: kvp[match.group('name')], self.template)
+        return value
 
 
 class ResultType:
@@ -96,11 +121,76 @@ class CommonConfig:
         self.truncate = args.truncate  # type: int
         self.redact = args.redact  # type: bool
 
+        self.info_stderr = False  # type: bool
+
         self.cache = {}
 
     def get_ansible_config(self):  # type: () -> str
         """Return the path to the Ansible config for the given config."""
         return os.path.join(ANSIBLE_TEST_DATA_ROOT, 'ansible.cfg')
+
+
+def get_docker_completion():
+    """
+    :rtype: dict[str, dict[str, str]]
+    """
+    return get_parameterized_completion(DOCKER_COMPLETION, 'docker')
+
+
+def get_remote_completion():
+    """
+    :rtype: dict[str, dict[str, str]]
+    """
+    return get_parameterized_completion(REMOTE_COMPLETION, 'remote')
+
+
+def get_network_completion():
+    """
+    :rtype: dict[str, dict[str, str]]
+    """
+    return get_parameterized_completion(NETWORK_COMPLETION, 'network')
+
+
+def get_parameterized_completion(cache, name):
+    """
+    :type cache: dict[str, dict[str, str]]
+    :type name: str
+    :rtype: dict[str, dict[str, str]]
+    """
+    if not cache:
+        if data_context().content.collection:
+            context = 'collection'
+        else:
+            context = 'ansible-core'
+
+        images = read_lines_without_comments(os.path.join(ANSIBLE_TEST_DATA_ROOT, 'completion', '%s.txt' % name), remove_blank_lines=True)
+
+        cache.update(dict(kvp for kvp in [parse_parameterized_completion(i) for i in images] if kvp and kvp[1].get('context', context) == context))
+
+    return cache
+
+
+def parse_parameterized_completion(value):  # type: (str) -> t.Optional[t.Tuple[str, t.Dict[str, str]]]
+    """Parse the given completion entry, returning the entry name and a dictionary of key/value settings."""
+    values = value.split()
+
+    if not values:
+        return None
+
+    name = values[0]
+    data = dict((kvp[0], kvp[1] if len(kvp) > 1 else '') for kvp in [item.split('=', 1) for item in values[1:]])
+
+    return name, data
+
+
+def docker_qualify_image(name):
+    """
+    :type name: str
+    :rtype: str
+    """
+    config = get_docker_completion().get(name, {})
+
+    return config.get('name', name)
 
 
 def handle_layout_messages(messages):  # type: (t.Optional[LayoutMessages]) -> None
@@ -138,10 +228,15 @@ def named_temporary_file(args, prefix, suffix, directory, content):
             yield tempfile_fd.name
 
 
-def write_json_test_results(category, name, content):  # type: (ResultType, str, t.Union[t.List[t.Any], t.Dict[str, t.Any]]) -> None
+def write_json_test_results(category,  # type: ResultType
+                            name,  # type: str
+                            content,  # type: t.Union[t.List[t.Any], t.Dict[str, t.Any]]
+                            formatted=True,  # type: bool
+                            encoder=None,  # type: t.Optional[t.Callable[[t.Any], t.Any]]
+                            ):  # type: (...) -> None
     """Write the given json content to the specified test results path, creating directories as needed."""
     path = os.path.join(category.path, name)
-    write_json_file(path, content, create_directories=True)
+    write_json_file(path, content, create_directories=True, formatted=formatted, encoder=encoder)
 
 
 def write_text_test_results(category, name, content):  # type: (ResultType, str, str) -> None
@@ -150,32 +245,12 @@ def write_text_test_results(category, name, content):  # type: (ResultType, str,
     write_text_file(path, content, create_directories=True)
 
 
-def write_json_file(path, content, create_directories=False):  # type: (str, t.Union[t.List[t.Any], t.Dict[str, t.Any]], bool) -> None
-    """Write the given json content to the specified path, optionally creating missing directories."""
-    text_content = json.dumps(content, sort_keys=True, indent=4) + '\n'
-    write_text_file(path, text_content, create_directories=create_directories)
-
-
-def write_text_file(path, content, create_directories=False):  # type: (str, str, bool) -> None
-    """Write the given text content to the specified path, optionally creating missing directories."""
-    if create_directories:
-        make_dirs(os.path.dirname(path))
-
-    with open(to_bytes(path), 'wb') as file:
-        file.write(to_bytes(content))
-
-
 def get_python_path(args, interpreter):
     """
     :type args: TestConfig
     :type interpreter: str
     :rtype: str
     """
-    # When the python interpreter is already named "python" its directory can simply be added to the path.
-    # Using another level of indirection is only required when the interpreter has a different name.
-    if os.path.basename(interpreter) == 'python':
-        return os.path.dirname(interpreter)
-
     python_path = PYTHON_PATHS.get(interpreter)
 
     if python_path:
@@ -192,18 +267,17 @@ def get_python_path(args, interpreter):
     python_path = tempfile.mkdtemp(prefix=prefix, suffix=suffix, dir=root_temp_dir)
     injected_interpreter = os.path.join(python_path, 'python')
 
-    # A symlink is faster than the execv wrapper, but isn't compatible with virtual environments.
-    # Attempt to detect when it is safe to use a symlink by checking the real path of the interpreter.
-    use_symlink = os.path.dirname(os.path.realpath(interpreter)) == os.path.dirname(interpreter)
+    # A symlink is faster than the execv wrapper, but isn't guaranteed to provide the correct result.
+    # There are several scenarios known not to work with symlinks:
+    #
+    # - A virtual environment where the target is a symlink to another directory.
+    # - A pyenv environment where the target is a shell script that changes behavior based on the program name.
+    #
+    # To avoid issues for these and other scenarios, only an exec wrapper is used.
 
-    if use_symlink:
-        display.info('Injecting "%s" as a symlink to the "%s" interpreter.' % (injected_interpreter, interpreter), verbosity=1)
+    display.info('Injecting "%s" as a execv wrapper for the "%s" interpreter.' % (injected_interpreter, interpreter), verbosity=1)
 
-        os.symlink(interpreter, injected_interpreter)
-    else:
-        display.info('Injecting "%s" as a execv wrapper for the "%s" interpreter.' % (injected_interpreter, interpreter), verbosity=1)
-
-        create_interpreter_wrapper(interpreter, injected_interpreter)
+    create_interpreter_wrapper(interpreter, injected_interpreter)
 
     os.chmod(python_path, MODE_DIRECTORY)
 
@@ -310,7 +384,7 @@ def get_coverage_environment(args, target_name, version, temp_path, module_cover
             # is responsible for adding '={language version}=coverage.{hostname}.{pid}.{id}'
             env['_ANSIBLE_COVERAGE_REMOTE_OUTPUT'] = os.path.join(remote_temp_path, '%s=%s=%s' % (
                 args.command, target_name, args.coverage_label or 'remote'))
-            env['_ANSIBLE_COVERAGE_REMOTE_WHITELIST'] = os.path.join(data_context().content.root, '*')
+            env['_ANSIBLE_COVERAGE_REMOTE_PATH_FILTER'] = os.path.join(data_context().content.root, '*')
 
     return env
 
@@ -335,6 +409,8 @@ def intercept_command(args, cmd, target_name, env, capture=False, data=None, cwd
     """
     if not env:
         env = common_environment()
+    else:
+        env = env.copy()
 
     cmd = list(cmd)
     version = python_version or args.python_version
@@ -357,6 +433,27 @@ def intercept_command(args, cmd, target_name, env, capture=False, data=None, cwd
                                             remote_temp_path=remote_temp_path))
 
     return run_command(args, cmd, capture=capture, env=env, data=data, cwd=cwd)
+
+
+def resolve_csharp_ps_util(import_name, path):
+    """
+    :type import_name: str
+    :type path: str
+    """
+    if data_context().content.is_ansible or not import_name.startswith('.'):
+        # We don't support relative paths for builtin utils, there's no point.
+        return import_name
+
+    packages = import_name.split('.')
+    module_packages = path.split(os.path.sep)
+
+    for package in packages:
+        if not module_packages or package:
+            break
+        del module_packages[-1]
+
+    return 'ansible_collections.%s%s' % (data_context().content.prefix,
+                                         '.'.join(module_packages + [p for p in packages if p]))
 
 
 def run_command(args, cmd, capture=False, env=None, data=None, cwd=None, always=False, stdin=None, stdout=None,

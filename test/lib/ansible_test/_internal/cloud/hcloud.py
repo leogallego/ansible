@@ -6,7 +6,6 @@ import os
 
 from ..util import (
     display,
-    is_shippable,
     ConfigParser,
 )
 
@@ -42,10 +41,7 @@ class HcloudCloudProvider(CloudProvider):
 
         aci = self._create_ansible_core_ci()
 
-        if os.path.isfile(aci.ci_key):
-            return
-
-        if is_shippable():
+        if aci.available:
             return
 
         super(HcloudCloudProvider, self).filter(targets, exclude)
@@ -87,7 +83,7 @@ class HcloudCloudProvider(CloudProvider):
         """
         :rtype: AnsibleCoreCI
         """
-        return AnsibleCoreCI(self.args, 'hetzner', 'hetzner', persist=False, stage=self.args.remote_stage, provider=self.args.remote_provider)
+        return AnsibleCoreCI(self.args, 'hetzner', 'hetzner', persist=False, stage=self.args.remote_stage, provider='hetzner', internal=True)
 
 
 class HcloudCloudEnvironment(CloudEnvironment):

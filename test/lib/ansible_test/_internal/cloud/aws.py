@@ -7,7 +7,6 @@ import os
 from ..util import (
     ApplicationError,
     display,
-    is_shippable,
     ConfigParser,
 )
 
@@ -34,10 +33,7 @@ class AwsCloudProvider(CloudProvider):
 
         aci = self._create_ansible_core_ci()
 
-        if os.path.isfile(aci.ci_key):
-            return
-
-        if is_shippable():
+        if aci.available:
             return
 
         super(AwsCloudProvider, self).filter(targets, exclude)
@@ -85,7 +81,7 @@ class AwsCloudProvider(CloudProvider):
         """
         :rtype: AnsibleCoreCI
         """
-        return AnsibleCoreCI(self.args, 'aws', 'sts', persist=False, stage=self.args.remote_stage, provider=self.args.remote_provider)
+        return AnsibleCoreCI(self.args, 'aws', 'aws', persist=False, stage=self.args.remote_stage, provider='aws', internal=True)
 
 
 class AwsCloudEnvironment(CloudEnvironment):
@@ -101,6 +97,7 @@ class AwsCloudEnvironment(CloudEnvironment):
             resource_prefix=self.resource_prefix,
         )
 
+        # noinspection PyTypeChecker
         ansible_vars.update(dict(parser.items('default')))
 
         display.sensitive.add(ansible_vars.get('aws_secret_key'))
@@ -124,4 +121,5 @@ class AwsCloudEnvironment(CloudEnvironment):
         """
         if not tries and self.managed:
             display.notice('If %s failed due to permissions, the IAM test policy may need to be updated. '
-                           'For help, consult @mattclay or @gundalow on GitHub or #ansible-devel on IRC.' % target.name)
+                           'https://docs.ansible.com/ansible/devel/dev_guide/platforms/aws_guidelines.html#aws-permissions-for-integration-tests.'
+                           % target.name)

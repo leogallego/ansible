@@ -14,18 +14,26 @@ Does Ansible work with Windows XP or Server 2003?
 ``````````````````````````````````````````````````
 Ansible does not work with Windows XP or Server 2003 hosts. Ansible does work with these Windows operating system versions:
 
-* Windows Server 2008
-* Windows Server 2008 R2
+* Windows Server 2008 :sup:`1`
+* Windows Server 2008 R2 :sup:`1`
 * Windows Server 2012
 * Windows Server 2012 R2
 * Windows Server 2016
 * Windows Server 2019
-* Windows 7
+* Windows 7 :sup:`1`
 * Windows 8.1
 * Windows 10
 
+1 - See the :ref:`Server 2008 FAQ <windows_faq_server2008>` entry for more details.
+
 Ansible also has minimum PowerShell version requirements - please see
 :ref:`windows_setup` for the latest information.
+
+.. _windows_faq_server2008:
+
+Are Server 2008, 2008 R2 and Windows 7 supported?
+`````````````````````````````````````````````````
+Microsoft ended Extended Support for these versions of Windows on January 14th, 2020, and Ansible deprecated official support in the 2.10 release. No new feature development will occur targeting these operating systems, and automated testing has ceased. However, existing modules and features will likely continue to work, and simple pull requests to resolve issues with these Windows versions may be accepted.
 
 Can I manage Windows Nano Server with Ansible?
 ``````````````````````````````````````````````
@@ -48,7 +56,7 @@ can be run in the bash terminal:
 
     sudo apt-get update
     sudo apt-get install python-pip git libffi-dev libssl-dev -y
-    pip install ansible pywinrm
+    pip install --user ansible pywinrm
 
 To run Ansible from source instead of a release on the WSL, simply uninstall the pip
 installed version and then clone the git repo.
@@ -61,6 +69,21 @@ installed version and then clone the git repo.
 
     # To enable Ansible on login, run the following
     echo ". ~/ansible/hacking/env-setup -q' >> ~/.bashrc
+
+If you encounter timeout errors when running Ansible on the WSL, this may be due to an issue
+with ``sleep`` not returning correctly. The following workaround may resolve the issue:
+
+.. code-block:: shell
+
+    mv /usr/bin/sleep /usr/bin/sleep.orig
+    ln -s /bin/true /usr/bin/sleep
+
+Another option is to use WSL 2 if running Windows 10 later than build 2004.
+
+.. code-block:: shell
+
+    wsl --set-default-version 2
+
 
 Can I use SSH keys to authenticate to Windows hosts?
 ````````````````````````````````````````````````````
@@ -169,7 +192,7 @@ to manage Windows hosts. To connect to Windows hosts over SSH, you must install 
 fork that is in development with Microsoft on
 the Windows host(s). While most of the basics should work with SSH,
 ``Win32-OpenSSH`` is rapidly changing, with new features added and bugs
-fixed in every release. It is highly recommend you install the latest release
+fixed in every release. It is highly recommend you `install <https://github.com/PowerShell/Win32-OpenSSH/wiki/Install-Win32-OpenSSH>`_ the latest release
 of ``Win32-OpenSSH`` from the GitHub Releases page when using it with Ansible
 on Windows hosts.
 
@@ -221,7 +244,7 @@ host.
    :ref:`about_playbooks`
        An introduction to playbooks
    :ref:`playbooks_best_practices`
-       Best practices advice
+       Tips and tricks for playbooks
    `User Mailing List <https://groups.google.com/group/ansible-project>`_
        Have a question?  Stop by the google group!
    `irc.freenode.net <http://irc.freenode.net>`_

@@ -44,7 +44,7 @@ class Layout:
         else:
             tree = self.__files_tree
 
-        parts = directory.rstrip(os.sep).split(os.sep)
+        parts = directory.rstrip(os.path.sep).split(os.path.sep)
         item = get_tree_item(tree, parts)
 
         if not item:
@@ -63,13 +63,13 @@ class Layout:
 
     def get_dirs(self, directory):  # type: (str) -> t.List[str]
         """Return a list directory paths found directly under the given directory."""
-        parts = directory.rstrip(os.sep).split(os.sep)
+        parts = directory.rstrip(os.path.sep).split(os.path.sep)
         item = get_tree_item(self.__files_tree, parts)
         return [os.path.join(directory, key) for key in item[0].keys()] if item else []
 
     def get_files(self, directory):  # type: (str) -> t.List[str]
         """Return a list of file paths found directly under the given directory."""
-        parts = directory.rstrip(os.sep).split(os.sep)
+        parts = directory.rstrip(os.path.sep).split(os.path.sep)
         item = get_tree_item(self.__files_tree, parts)
         return item[1] if item else []
 
@@ -193,6 +193,10 @@ class LayoutProvider(PathProvider):
         'terminal',
         'test',
         'vars',
+        # The following are plugin directories not directly supported by ansible-core, but used in collections
+        # (https://github.com/ansible-collections/overview/blob/main/collection_requirements.rst#modules--plugins)
+        'plugin_utils',
+        'sub_plugins',
     )
 
     @abc.abstractmethod
@@ -200,12 +204,12 @@ class LayoutProvider(PathProvider):
         """Create a layout using the given root and paths."""
 
 
-def paths_to_tree(paths):  # type: (t.List[str]) -> t.Tuple(t.Dict[str, t.Any], t.List[str])
+def paths_to_tree(paths):  # type: (t.List[str]) -> t.Tuple[t.Dict[str, t.Any], t.List[str]]
     """Return a filesystem tree from the given list of paths."""
     tree = {}, []
 
     for path in paths:
-        parts = path.split(os.sep)
+        parts = path.split(os.path.sep)
         root = tree
 
         for part in parts[:-1]:
@@ -219,7 +223,7 @@ def paths_to_tree(paths):  # type: (t.List[str]) -> t.Tuple(t.Dict[str, t.Any], 
     return tree
 
 
-def get_tree_item(tree, parts):  # type: (t.Tuple(t.Dict[str, t.Any], t.List[str]), t.List[str]) -> t.Optional[t.Tuple(t.Dict[str, t.Any], t.List[str])]
+def get_tree_item(tree, parts):  # type: (t.Tuple[t.Dict[str, t.Any], t.List[str]], t.List[str]) -> t.Optional[t.Tuple[t.Dict[str, t.Any], t.List[str]]]
     """Return the portion of the tree found under the path given by parts, or None if it does not exist."""
     root = tree
 

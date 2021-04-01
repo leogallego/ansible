@@ -52,14 +52,14 @@ In Ansible 2.7 and older::
 
     {{ ((foo | default({})).bar | default({})).baz | default('DEFAULT') }}
 
-    or
+or::
 
     {{ foo.bar.baz if (foo is defined and foo.bar is defined and foo.bar.baz is defined) else 'DEFAULT' }}
 
 Module option conversion to string
 ----------------------------------
 
-Beginning in version 2.8, Ansible will warn if a module expects a string, but a non-string value is passed and automatically converted to a string. This highlights potential problems where, for example, a ``yes`` or ``true`` (parsed as truish boolean value) would be converted to the string ``'True'``, or where a version number ``1.10`` (parsed as float value) would be converted to ``'1.0'``. Such conversions can result in unexpected behavior depending on context.
+Beginning in version 2.8, Ansible will warn if a module expects a string, but a non-string value is passed and automatically converted to a string. This highlights potential problems where, for example, a ``yes`` or ``true`` (parsed as truish boolean value) would be converted to the string ``'True'``, or where a version number ``1.10`` (parsed as float value) would be converted to ``'1.1'``. Such conversions can result in unexpected behavior depending on context.
 
 This behavior can be changed to be an error or to be ignored by setting the ``ANSIBLE_STRING_CONVERSION_ACTION`` environment variable, or by setting the ``string_conversion_action`` configuration in the ``defaults`` section of ``ansible.cfg``.
 
@@ -246,7 +246,7 @@ best solution is to explicitly set ``ansible_python_interpreter`` to the path
 of the correct interpreter for those target systems.
 
 You can still set ``ansible_python_interpreter`` to a specific path at any
-variable level (as a host variable, in vars files, in playbooks, etc.).
+variable level (as a host variable, in vars files, in playbooks, and so on).
 If you prefer to use the Python interpreter discovery behavior, use
 one of the four new values for ``ansible_python_interpreter`` introduced in
 Ansible 2.8:
@@ -286,7 +286,7 @@ use the discovered Python, regardless of whether :command:`/usr/bin/python` exis
 :literal:`auto_legacy` setting provides compatibility with previous versions of Ansible that always
 defaulted to :command:`/usr/bin/python`.
 
-If you installed Python and dependencies (``boto``, etc.) to
+If you installed Python and dependencies (``boto``, and so on) to
 :command:`/usr/bin/python` as a workaround on distros with a different default Python
 interpreter (for example, Ubuntu 16.04+, RHEL8, Fedora 23+), you have two
 options:
@@ -371,6 +371,13 @@ add ``$ErrorActionPreference = "Continue"`` to the top of the module. This chang
 of the EAP that was accidentally removed in a previous release and ensure that modules are more resilient to errors
 that may occur in execution.
 
+* Version 2.8.14 of Ansible changed the default mode of file-based tasks to ``0o600 & ~umask`` when the user did not specify a ``mode`` parameter on file-based tasks. This was in response to a CVE report which we have reconsidered. As a result, the ``mode`` change has been reverted in 2.8.15, and ``mode`` will now default to ``0o666 & ~umask`` as in previous versions of Ansible.
+* If you changed any tasks to specify less restrictive permissions while using 2.8.14, those changes will be unnecessary (but will do no harm) in 2.8.15.
+* To avoid the issue raised in CVE-2020-1736, specify a ``mode`` parameter in all file-based tasks that accept it.
+
+* ``dnf`` and ``yum`` - As of version 2.8.15, the ``dnf`` module (and ``yum`` action when it uses ``dnf``) now correctly validates GPG signatures of packages (CVE-2020-14365). If you see an error such as ``Failed to validate GPG signature for [package name]``, please ensure that you have imported the correct GPG key for the DNF repository and/or package you are using. One way to do this is with the ``rpm_key`` module. Although we discourage it, in some cases it may be necessary to disable the GPG check. This can be done by explicitly adding ``disable_gpg_check: yes`` in your ``dnf`` or ``yum`` task.
+
+
 Modules removed
 ---------------
 
@@ -389,17 +396,17 @@ The following modules will be removed in Ansible 2.12. Please update your playbo
 
 * ``foreman`` use `foreman-ansible-modules <https://github.com/theforeman/foreman-ansible-modules>`_ instead.
 * ``katello`` use `foreman-ansible-modules <https://github.com/theforeman/foreman-ansible-modules>`_ instead.
-* ``github_hooks`` use :ref:`github_webhook <github_webhook_module>` and :ref:`github_webhook_facts <github_webhook_facts_module>` instead.
-* ``digital_ocean`` use :ref:`digital_ocean_droplet <digital_ocean_droplet_module>` instead.
-* ``gce`` use :ref:`gcp_compute_instance <gcp_compute_instance_module>` instead.
-* ``gcspanner`` use :ref:`gcp_spanner_instance <gcp_spanner_instance_module>` and :ref:`gcp_spanner_database <gcp_spanner_database_module>` instead.
-* ``gcdns_record`` use :ref:`gcp_dns_resource_record_set <gcp_dns_resource_record_set_module>` instead.
-* ``gcdns_zone`` use :ref:`gcp_dns_managed_zone <gcp_dns_managed_zone_module>` instead.
-* ``gcp_forwarding_rule`` use :ref:`gcp_compute_global_forwarding_rule <gcp_compute_global_forwarding_rule_module>` or :ref:`gcp_compute_forwarding_rule <gcp_compute_forwarding_rule_module>` instead.
-* ``gcp_healthcheck`` use :ref:`gcp_compute_health_check <gcp_compute_health_check_module>`, :ref:`gcp_compute_http_health_check <gcp_compute_http_health_check_module>`, or :ref:`gcp_compute_https_health_check <gcp_compute_https_health_check_module>` instead.
-* ``gcp_backend_service`` use :ref:`gcp_compute_backend_service <gcp_compute_backend_service_module>` instead.
-* ``gcp_target_proxy`` use :ref:`gcp_compute_target_http_proxy <gcp_compute_target_http_proxy_module>` instead.
-* ``gcp_url_map`` use :ref:`gcp_compute_url_map <gcp_compute_url_map_module>` instead.
+* ``github_hooks`` use :ref:`github_webhook <ansible_2_8:github_webhook_module>` and :ref:`github_webhook_facts <ansible_2_8:github_webhook_facts_module>` instead.
+* ``digital_ocean`` use :ref:`digital_ocean_droplet <ansible_2_8:digital_ocean_droplet_module>` instead.
+* ``gce`` use :ref:`gcp_compute_instance <ansible_2_8:gcp_compute_instance_module>` instead.
+* ``gcspanner`` use :ref:`gcp_spanner_instance <ansible_2_8:gcp_spanner_instance_module>` and :ref:`gcp_spanner_database <ansible_2_8:gcp_spanner_database_module>` instead.
+* ``gcdns_record`` use :ref:`gcp_dns_resource_record_set <ansible_2_8:gcp_dns_resource_record_set_module>` instead.
+* ``gcdns_zone`` use :ref:`gcp_dns_managed_zone <ansible_2_8:gcp_dns_managed_zone_module>` instead.
+* ``gcp_forwarding_rule`` use :ref:`gcp_compute_global_forwarding_rule <ansible_2_8:gcp_compute_global_forwarding_rule_module>` or :ref:`gcp_compute_forwarding_rule <ansible_2_8:gcp_compute_forwarding_rule_module>` instead.
+* ``gcp_healthcheck`` use :ref:`gcp_compute_health_check <ansible_2_8:gcp_compute_health_check_module>`, :ref:`gcp_compute_http_health_check <ansible_2_8:gcp_compute_http_health_check_module>`, or :ref:`gcp_compute_https_health_check <ansible_2_8:gcp_compute_https_health_check_module>` instead.
+* ``gcp_backend_service`` use :ref:`gcp_compute_backend_service <ansible_2_8:gcp_compute_backend_service_module>` instead.
+* ``gcp_target_proxy`` use :ref:`gcp_compute_target_http_proxy <ansible_2_8:gcp_compute_target_http_proxy_module>` instead.
+* ``gcp_url_map`` use :ref:`gcp_compute_url_map <ansible_2_8:gcp_compute_url_map_module>` instead.
 * ``panos`` use the `Palo Alto Networks Ansible Galaxy role <https://galaxy.ansible.com/PaloAltoNetworks/paloaltonetworks>`_ instead.
 
 
@@ -453,7 +460,7 @@ Noteworthy module changes
 * The ``docker_volume`` module has deprecated the returned fact ``docker_container``. The same value is
   available as the returned variable ``volume``. The returned fact will be removed in Ansible 2.12.
 
-* The ``docker_service`` module was renamed to :ref:`docker_compose <docker_compose_module>`.
+* The ``docker_service`` module was renamed to :ref:`docker_compose <ansible_2_8:docker_compose_module>`.
 * The renamed ``docker_compose`` module used to return one fact per service, named same as the service. A dictionary
   of these facts is returned as the regular return value ``services``. The returned facts will be removed in
   Ansible 2.12.

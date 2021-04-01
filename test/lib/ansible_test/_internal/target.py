@@ -10,13 +10,20 @@ import abc
 
 from . import types as t
 
+from .encoding import (
+    to_bytes,
+    to_text,
+)
+
+from .io import (
+    read_text_file,
+)
+
 from .util import (
     ApplicationError,
     display,
     read_lines_without_comments,
     is_subdir,
-    to_text,
-    to_bytes,
 )
 
 from .data import (
@@ -26,11 +33,13 @@ from .data import (
 MODULE_EXTENSIONS = '.py', '.ps1'
 
 try:
+    # noinspection PyTypeChecker
     TCompletionTarget = t.TypeVar('TCompletionTarget', bound='CompletionTarget')
 except AttributeError:
     TCompletionTarget = None  # pylint: disable=invalid-name
 
 try:
+    # noinspection PyTypeChecker
     TIntegrationTarget = t.TypeVar('TIntegrationTarget', bound='IntegrationTarget')
 except AttributeError:
     TIntegrationTarget = None  # pylint: disable=invalid-name
@@ -144,7 +153,7 @@ def filter_targets(targets,  # type: t.Iterable[TCompletionTarget]
             continue
 
         if directories and matched_directories:
-            yield DirectoryTarget(sorted(matched_directories, key=len)[0], target.modules)
+            yield DirectoryTarget(to_text(sorted(matched_directories, key=len)[0]), target.modules)
         else:
             yield target
 
@@ -278,7 +287,7 @@ def walk_integration_targets():
         paths.append(os.path.sep.join(path_tuple))
 
     for path in paths:
-        yield IntegrationTarget(path, modules, prefixes)
+        yield IntegrationTarget(to_text(path), modules, prefixes)
 
 
 def load_integration_prefixes():
@@ -291,8 +300,7 @@ def load_integration_prefixes():
 
     for file_path in file_paths:
         prefix = os.path.splitext(file_path)[1][1:]
-        with open(file_path, 'r') as prefix_fd:
-            prefixes.update(dict((k, prefix) for k in prefix_fd.read().splitlines()))
+        prefixes.update(dict((k, prefix) for k in read_text_file(file_path).splitlines()))
 
     return prefixes
 
@@ -327,7 +335,7 @@ def walk_test_targets(path=None, module_path=None, extensions=None, prefix=None,
         if symlink and not include_symlinks:
             continue
 
-        yield TestTarget(file_path, module_path, prefix, path, symlink)
+        yield TestTarget(to_text(file_path), module_path, prefix, path, symlink)
 
     file_paths = []
 
@@ -398,12 +406,11 @@ def analyze_integration_target_dependencies(integration_targets):
 
         for meta_path in meta_paths:
             if os.path.exists(meta_path):
-                with open(meta_path, 'rb') as meta_fd:
-                    # try and decode the file as a utf-8 string, skip if it contains invalid chars (binary file)
-                    try:
-                        meta_lines = to_text(meta_fd.read()).splitlines()
-                    except UnicodeDecodeError:
-                        continue
+                # try and decode the file as a utf-8 string, skip if it contains invalid chars (binary file)
+                try:
+                    meta_lines = read_text_file(meta_path).splitlines()
+                except UnicodeDecodeError:
+                    continue
 
                 for meta_line in meta_lines:
                     if re.search(r'^ *#.*$', meta_line):
@@ -634,10 +641,17 @@ class IntegrationTarget(CompletionTarget):
 
         targets_relative_path = data_context().content.integration_targets_path
 
+        # Collect skip entries before group expansion to avoid registering more specific skip entries as less specific versions.
+        self.skips = tuple(g for g in groups if g.startswith('skip/'))
+
         # Collect file paths before group expansion to avoid including the directories.
         # Ignore references to test targets, as those must be defined using `needs/target/*` or other target references.
         self.needs_file = tuple(sorted(set('/'.join(g.split('/')[2:]) for g in groups if
                                            g.startswith('needs/file/') and not g.startswith('needs/file/%s/' % targets_relative_path))))
+
+        # network platform
+        networks = [g.split('/')[1] for g in groups if g.startswith('network/')]
+        self.network_platform = networks[0] if networks else None
 
         for group in itertools.islice(groups, 0, len(groups)):
             if '/' in group:

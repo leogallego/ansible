@@ -6,7 +6,7 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 DOCUMENTATION = '''
-    callback: default
+    name: default
     type: stdout
     short_description: default Ansible screen output
     version_added: historical
@@ -16,25 +16,7 @@ DOCUMENTATION = '''
       - default_callback
     requirements:
       - set as stdout in configuration
-    options:
-      check_mode_markers:
-        name: Show markers when running in check mode
-        description:
-        - "Toggle to control displaying markers when running in check mode. The markers are C(DRY RUN)
-        at the beggining and ending of playbook execution (when calling C(ansible-playbook --check))
-        and C(CHECK MODE) as a suffix at every play and task that is run in check mode."
-        type: bool
-        default: no
-        version_added: 2.9
-        env:
-          - name: ANSIBLE_CHECK_MODE_MARKERS
-        ini:
-          - key: check_mode_markers
-            section: defaults
 '''
-
-# NOTE: check_mode_markers functionality is also implemented in the following derived plugins:
-#       debug.py, yaml.py, dense.py. Maybe their documentation needs updating, too.
 
 
 from ansible import constants as C
@@ -42,7 +24,6 @@ from ansible import context
 from ansible.playbook.task_include import TaskInclude
 from ansible.plugins.callback import CallbackBase
 from ansible.utils.color import colorize, hostcolor
-
 
 # These values use ansible.constants for historical reasons, mostly to allow
 # unmodified derivative plugins to work. However, newer options added to the
@@ -57,7 +38,8 @@ COMPAT_OPTIONS = (('display_skipped_hosts', C.DISPLAY_SKIPPED_HOSTS),
                   ('display_ok_hosts', True),
                   ('show_custom_stats', C.SHOW_CUSTOM_STATS),
                   ('display_failed_stderr', False),
-                  ('check_mode_markers', False),)
+                  ('check_mode_markers', False),
+                  ('show_per_host_start', False))
 
 
 class CallbackModule(CallbackBase):
@@ -88,6 +70,8 @@ class CallbackModule(CallbackBase):
             try:
                 value = self.get_option(option)
             except (AttributeError, KeyError):
+                self._display.deprecated("'%s' is subclassing DefaultCallback without the corresponding doc_fragment." % self._load_name,
+                                         version='2.14', collection_name='ansible.builtin')
                 value = constant
             setattr(self, option, value)
 
@@ -107,10 +91,14 @@ class CallbackModule(CallbackBase):
 
         else:
             if delegated_vars:
+                if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
+                    self._print_task_path(result._task)
                 self._display.display("fatal: [%s -> %s]: FAILED! => %s" % (result._host.get_name(), delegated_vars['ansible_host'],
                                                                             self._dump_results(result._result)),
                                       color=C.COLOR_ERROR, stderr=self.display_failed_stderr)
             else:
+                if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
+                    self._print_task_path(result._task)
                 self._display.display("fatal: [%s]: FAILED! => %s" % (result._host.get_name(), self._dump_results(result._result)),
                                       color=C.COLOR_ERROR, stderr=self.display_failed_stderr)
 
@@ -122,6 +110,8 @@ class CallbackModule(CallbackBase):
         delegated_vars = result._result.get('_ansible_delegated_vars', None)
 
         if isinstance(result._task, TaskInclude):
+            if self._last_task_banner != result._task._uuid:
+                self._print_task_banner(result._task)
             return
         elif result._result.get('changed', False):
             if self._last_task_banner != result._task._uuid:
@@ -202,8 +192,8 @@ class CallbackModule(CallbackBase):
 
         # Preserve task name, as all vars may not be available for templating
         # when we need it later
-        if self._play.strategy == 'free':
-            # Explicitly set to None for strategy 'free' to account for any cached
+        if self._play.strategy in ('free', 'host_pinned'):
+            # Explicitly set to None for strategy free/host_pinned to account for any cached
             # task title from a previous non-free play
             self._last_task_name = None
         else:
@@ -239,10 +229,9 @@ class CallbackModule(CallbackBase):
         else:
             checkmsg = ""
         self._display.banner(u"%s [%s%s]%s" % (prefix, task_name, args, checkmsg))
+
         if self._display.verbosity >= 2:
-            path = task.get_path()
-            if path:
-                self._display.display(u"task path: %s" % path, color=C.COLOR_DEBUG)
+            self._print_task_path(task)
 
         self._last_task_banner = task._uuid
 
@@ -290,7 +279,6 @@ class CallbackModule(CallbackBase):
     def v2_runner_item_on_ok(self, result):
 
         delegated_vars = result._result.get('_ansible_delegated_vars', None)
-        self._clean_results(result._result, result._task.action)
         if isinstance(result._task, TaskInclude):
             return
         elif result._result.get('changed', False):
@@ -316,6 +304,7 @@ class CallbackModule(CallbackBase):
 
         msg += " => (item=%s)" % (self._get_item_label(result._result),)
 
+        self._clean_results(result._result, result._task.action)
         if self._run_is_verbose(result):
             msg += " => %s" % self._dump_results(result._result)
         self._display.display(msg, color=color)
@@ -350,8 +339,9 @@ class CallbackModule(CallbackBase):
 
     def v2_playbook_on_include(self, included_file):
         msg = 'included: %s for %s' % (included_file._filename, ", ".join([h.name for h in included_file._hosts]))
-        if 'item' in included_file._args:
-            msg += " => (item=%s)" % (self._get_item_label(included_file._args),)
+        label = self._get_item_label(included_file._vars)
+        if label:
+            msg += " => (item=%s)" % label
         self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_playbook_on_stats(self, stats):
@@ -435,6 +425,16 @@ class CallbackModule(CallbackBase):
         if self._run_is_verbose(result, verbosity=2):
             msg += "Result was: %s" % self._dump_results(result._result)
         self._display.display(msg, color=C.COLOR_DEBUG)
+
+    def v2_runner_on_async_poll(self, result):
+        host = result._host.get_name()
+        jid = result._result.get('ansible_job_id')
+        started = result._result.get('started')
+        finished = result._result.get('finished')
+        self._display.display(
+            'ASYNC POLL on %s: jid=%s started=%s finished=%s' % (host, jid, started, finished),
+            color=C.COLOR_DEBUG
+        )
 
     def v2_playbook_on_notify(self, handler, host):
         if self._display.verbosity > 1:
